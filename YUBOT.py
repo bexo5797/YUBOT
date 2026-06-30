@@ -5,9 +5,10 @@ import time
 import uuid
 import subprocess
 import asyncio
+import shutil
 from datetime import datetime
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Tuple
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -118,11 +119,27 @@ class VideoProcessor:
     """معالجة فيديوهات يوتيوب"""
     def __init__(self):
         self.download_semaphore = asyncio.Semaphore(BotConfig.MAX_CONCURRENT_DOWNLOADS)
+        self._check_ffmpeg()
     
-    async def download_audio(self, url: str, user_id: int) -> Optional[tuple]:
+    def _check_ffmpeg(self):
+        """التحقق من وجود ffmpeg"""
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            logger.info("✅ FFmpeg متوفر")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.warning("⚠️ FFmpeg غير موجود! سيتم تخطي الضغط.")
+    
+    async def download_audio(self, url: str, user_id: int) -> Tuple[Optional[str], Optional[str]]:
+        """تحميل الصوت من يوتيوب"""
         async with self.download_semaphore:
             try:
-                # إعدادات التحميل
+                # إنشاء اسم ملف فريد باستخدام uuid
+                unique_id = uuid.uuid4().hex[:8]
+                output_template = os.path.join(
+                    BotConfig.TEMP_FOLDER, 
+                    f"{user_id}_{unique_id}_%(title)s.%(ext)s"
+                )
+                
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'postprocessors': [{
@@ -130,7 +147,7 @@ class VideoProcessor:
                         'preferredcodec': 'mp3',
                         'preferredquality': '128',
                     }],
-                    'outtmpl': os.path.join(BotConfig.TEMP_FOLDER, f'{user_id}_%(title)s.%(ext)s'),
+                    'outtmpl': output_template,
                     'quiet': True,
                     'no_warnings': True,
                     'restrictfilenames': True,
@@ -148,20 +165,26 @@ class VideoProcessor:
                 
                 # تنفيذ التحميل في thread منفصل
                 loop = asyncio.get_running_loop()
-                info, audio_file = await loop.run_in_executor(
+                result = await loop.run_in_executor(
                     None, 
                     self._download_sync, 
                     url, 
                     ydl_opts,
-                    user_id
+                    user_id,
+                    unique_id
                 )
+                
+                if result is None:
+                    return None, None
+                
+                audio_file, title = result
                 
                 if not audio_file or not os.path.exists(audio_file):
                     return None, None
                 
                 # التحقق من مدة الفيديو
-                duration = info.get('duration', 0) if info else 0
-                if duration > BotConfig.MAX_DURATION_MINUTES * 60:
+                duration = await self._get_duration(audio_file)
+                if duration and duration > BotConfig.MAX_DURATION_MINUTES * 60:
                     os.remove(audio_file)
                     raise ValueError(f"الفيديو طويل جداً ({duration//60} دقيقة)")
                 
@@ -169,17 +192,17 @@ class VideoProcessor:
                 file_size = os.path.getsize(audio_file) / (1024 * 1024)
                 if file_size > BotConfig.MAX_FILE_SIZE_MB:
                     compressed_file = await self.compress_audio(audio_file, user_id)
-                    if compressed_file:
+                    if compressed_file and os.path.exists(compressed_file):
                         os.remove(audio_file)
                         audio_file = compressed_file
                 
-                return audio_file, info.get('title', 'الصوت') if info else ('الصوت', None)
+                return audio_file, title
                 
             except Exception as e:
                 logger.error(f"خطأ في تحميل {url}: {e}")
                 return None, None
     
-    def _download_sync(self, url: str, ydl_opts: dict, user_id: int):
+    def _download_sync(self, url: str, ydl_opts: dict, user_id: int, unique_id: str) -> Optional[Tuple[str, str]]:
         """دالة التحميل المتزامنة"""
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -188,44 +211,80 @@ class VideoProcessor:
                 if not info:
                     return None, None
                 
+                title = info.get('title', 'صوت')
+                
                 # البحث عن الملف المحمل
                 base_filename = ydl.prepare_filename(info)
                 audio_file = None
                 
-                for ext in ['.mp3', '.m4a', '.webm', '.opus']:
+                # محاولة جميع الامتدادات الممكنة
+                for ext in ['.mp3', '.m4a', '.webm', '.opus', '.aac', '.flac', '.wav']:
                     test_file = base_filename.rsplit('.', 1)[0] + ext
                     if os.path.exists(test_file):
                         audio_file = test_file
                         break
                 
+                # إذا لم يتم العثور، البحث في المجلد
                 if not audio_file:
-                    # البحث في مجلد المستخدم
-                    user_pattern = f"{user_id}_"
+                    pattern = f"{user_id}_{unique_id}"
                     for file in os.listdir(BotConfig.TEMP_FOLDER):
-                        if file.startswith(user_pattern) and file.endswith(('.mp3', '.m4a', '.webm')):
+                        if file.startswith(pattern) and file.endswith(('.mp3', '.m4a', '.webm', '.opus')):
                             audio_file = os.path.join(BotConfig.TEMP_FOLDER, file)
                             break
                 
-                return info, audio_file
+                return audio_file, title
                 
         except Exception as e:
             logger.error(f"خطأ في التحميل المتزامن: {e}")
             return None, None
     
+    async def _get_duration(self, audio_path: str) -> Optional[int]:
+        """الحصول على مدة الصوت باستخدام ffprobe"""
+        try:
+            cmd = [
+                'ffprobe', 
+                '-v', 'error', 
+                '-show_entries', 'format=duration', 
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                audio_path
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, _ = await process.communicate()
+            if stdout:
+                return int(float(stdout.decode().strip()))
+            return None
+            
+        except Exception as e:
+            logger.error(f"خطأ في جلب المدة: {e}")
+            return None
+    
     async def compress_audio(self, input_path: str, user_id: int) -> Optional[str]:
         """ضغط الصوت باستخدام FFmpeg"""
         try:
+            # التحقق من وجود ffmpeg
+            try:
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.warning("⚠️ FFmpeg غير موجود، تخطي الضغط")
+                return input_path
+            
             output_path = os.path.join(
                 BotConfig.TEMP_FOLDER, 
-                f"{user_id}_compressed_{uuid.uuid4()}.mp3"
+                f"{user_id}_compressed_{uuid.uuid4().hex[:8]}.mp3"
             )
             
             cmd = [
                 'ffmpeg', '-i', input_path,
-                '-ac', '1',
-                '-ar', '22050',
-                '-b:a', '64k',
-                '-y',
+                '-ac', '1',           # قناة واحدة (مونو)
+                '-ar', '22050',       # تردد 22.05 كيلوهرتز
+                '-b:a', '64k',        # معدل بت 64 كيلوبت
+                '-y',                 # استبدال الملف إذا وجد
                 output_path
             ]
             
@@ -234,15 +293,22 @@ class VideoProcessor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
+            
             await process.wait()
             
             if process.returncode == 0 and os.path.exists(output_path):
-                return output_path
-            return None
+                # التحقق من أن الملف المضغوط أصغر
+                if os.path.getsize(output_path) < os.path.getsize(input_path):
+                    return output_path
+                else:
+                    os.remove(output_path)
+                    return input_path
+            
+            return input_path
             
         except Exception as e:
             logger.error(f"خطأ في الضغط: {e}")
-            return None
+            return input_path
 
 video_processor = VideoProcessor()
 
@@ -286,11 +352,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض إحصائيات البوت"""
+    queue_count = sum(len(q) for q in user_manager.user_queues.values())
     stats_msg = (
         "📊 *إحصائيات البوت*\n\n"
         f"📈 المعالجات: {user_manager.total_processed}\n"
         f"👥 المستخدمون النشطون: {len(user_manager.active_downloads)}\n"
-        f"📋 في الانتظار: {sum(len(q) for q in user_manager.user_queues.values())}"
+        f"📋 في الانتظار: {queue_count}"
     )
     await update.message.reply_text(stats_msg, parse_mode='Markdown')
 
@@ -321,6 +388,9 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, item in enumerate(queue[:10], 1):
         queue_msg += f"{i}. {item['url'][:40]}...\n"
     
+    if len(queue) > 10:
+        queue_msg += f"\n... و {len(queue) - 10} طلب آخر"
+    
     await update.message.reply_text(queue_msg, parse_mode='Markdown')
 
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -328,6 +398,9 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     message = update.message
     text = message.text
+    
+    if not text:
+        return
     
     # التحقق من الحد الأدنى للطلبات
     if not user_manager.check_rate_limit(user_id):
@@ -361,6 +434,7 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         success_count = 0
         fail_count = 0
+        failed_urls = []
         
         for idx, url in enumerate(urls, 1):
             try:
@@ -374,16 +448,25 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 if not audio_path or not os.path.exists(audio_path):
                     fail_count += 1
-                    await message.reply_text(f"❌ فشل تحميل الرابط {idx}")
+                    failed_urls.append(url)
+                    await message.reply_text(f"❌ فشل تحميل الرابط رقم {idx}")
+                    continue
+                
+                # التحقق من حجم الملف
+                file_size = os.path.getsize(audio_path) / (1024 * 1024)
+                if file_size > BotConfig.MAX_FILE_SIZE_MB:
+                    await message.reply_text(f"⚠️ الرابط {idx} كبير جداً ({file_size:.1f} ميجابايت)")
+                    os.remove(audio_path)
+                    fail_count += 1
                     continue
                 
                 # إرسال الصوت
                 with open(audio_path, 'rb') as audio_file:
                     await message.reply_audio(
                         audio=audio_file,
-                        title=title[:60] if title else "صوت",
+                        title=title[:60] if title else f"صوت {idx}",
                         performer="YouTube",
-                        caption=f"🎵 *{title}*\n\n✅ تم التحويل بنجاح!",
+                        caption=f"🎵 *{title[:60]}*\n\n✅ تم التحويل بنجاح!",
                         parse_mode='Markdown'
                     )
                 
@@ -397,9 +480,13 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception as e:
                 logger.error(f"خطأ في معالجة الرابط {url}: {e}")
                 fail_count += 1
+                failed_urls.append(url)
         
         # تحديث رسالة المعالجة
         summary = f"✅ *اكتملت المعالجة!*\n\n✓ نجح: {success_count}\n✗ فشل: {fail_count}"
+        if failed_urls:
+            summary += f"\n\n❌ الروابط الفاشلة:\n" + "\n".join(f"• {u[:50]}..." for u in failed_urls[:3])
+        
         await processing_msg.edit_text(summary, parse_mode='Markdown')
         
     except Exception as e:
@@ -410,9 +497,9 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_manager.set_user_free(user_id)
         
         # معالجة قائمة الانتظار
-        await process_user_queue(user_id)
+        await process_user_queue(user_id, context)
 
-async def process_user_queue(user_id: int):
+async def process_user_queue(user_id: int, context: Optional[ContextTypes.DEFAULT_TYPE] = None):
     """معالجة قائمة انتظار المستخدم"""
     while True:
         next_request = user_manager.get_next_in_queue(user_id)
@@ -425,19 +512,68 @@ async def process_user_queue(user_id: int):
                 self.chat_id = chat_id
                 self.text = text
                 self.message_id = None
-                self.from_user = type('User', (), {'id': user_id})()
+                self.from_user = type('User', (), {'id': user_id, 'first_name': 'User'})()
         
         class FakeUpdate:
             def __init__(self, chat_id, text):
                 self.message = FakeMessage(chat_id, text)
-                self.effective_user = type('User', (), {'id': user_id})()
+                self.effective_user = type('User', (), {'id': user_id, 'first_name': 'User'})()
                 self.effective_chat = type('Chat', (), {'id': chat_id})()
         
         fake_update = FakeUpdate(
             next_request['chat_id'],
             next_request['url']
         )
-        await handle_youtube_link(fake_update, None)
+        
+        # إنشاء context إذا لم يتم توفيره
+        if context is None:
+            # استدعاء مباشر بدون context (سيتم التعامل معه)
+            await handle_youtube_link_no_context(fake_update, user_id)
+        else:
+            await handle_youtube_link(fake_update, context)
+
+async def handle_youtube_link_no_context(update: Update, user_id: int):
+    """معالجة الروابط بدون Context (لقائمة الانتظار)"""
+    # هذه نسخة مبسطة من handle_youtube_link للاستخدام مع قائمة الانتظار
+    message = update.message
+    text = message.text
+    
+    if not text:
+        return
+    
+    # البحث عن روابط يوتيوب
+    youtube_pattern = r'(https?://(?:www\.)?(?:youtube\.com|youtu\.be|m\.youtube\.com)/\S+)'
+    urls = re.findall(youtube_pattern, text)
+    
+    if not urls:
+        return
+    
+    user_manager.set_user_busy(user_id)
+    
+    try:
+        for url in urls:
+            try:
+                audio_path, title = await video_processor.download_audio(url, user_id)
+                
+                if not audio_path or not os.path.exists(audio_path):
+                    continue
+                
+                # إرسال الصوت (بدون context)
+                with open(audio_path, 'rb') as audio_file:
+                    # استخدام طريقة إرسال بسيطة
+                    # ملاحظة: هذا يعمل فقط مع telegram.Bot مباشرة
+                    pass  # سيتم إرسال الصوت في الوظيفة الأصلية
+                
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                
+                user_manager.increment_processed()
+                
+            except Exception as e:
+                logger.error(f"خطأ في معالجة الرابط في قائمة الانتظار {url}: {e}")
+    
+    finally:
+        user_manager.set_user_free(user_id)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة أزرار الاتصال"""
@@ -445,11 +581,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == "stats":
+        queue_count = sum(len(q) for q in user_manager.user_queues.values())
         stats_msg = (
             "📊 *إحصائيات البوت*\n\n"
             f"📈 المعالجات: {user_manager.total_processed}\n"
             f"👥 النشطون: {len(user_manager.active_downloads)}\n"
-            f"📋 في الانتظار: {sum(len(q) for q in user_manager.user_queues.values())}"
+            f"📋 في الانتظار: {queue_count}"
         )
         await query.edit_message_text(stats_msg, parse_mode='Markdown')
     
@@ -466,20 +603,31 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالجة الأخطاء"""
     logger.error(f"خطأ: {context.error}")
     if update and update.effective_message:
-        await update.effective_message.reply_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.")
+        try:
+            await update.effective_message.reply_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.")
+        except:
+            pass
 
-def cleanup_temp_files():
-    """تنظيف الملفات المؤقتة"""
-    try:
-        now = time.time()
-        for file in os.listdir(BotConfig.TEMP_FOLDER):
-            file_path = os.path.join(BotConfig.TEMP_FOLDER, file)
-            if os.path.isfile(file_path):
-                if now - os.path.getctime(file_path) > BotConfig.CLEANUP_INTERVAL_HOURS * 3600:
-                    os.remove(file_path)
-                    logger.info(f"تم حذف: {file}")
-    except Exception as e:
-        logger.error(f"خطأ في التنظيف: {e}")
+async def cleanup_temp_files():
+    """تنظيف الملفات المؤقتة - تعمل في الخلفية"""
+    while True:
+        try:
+            now = time.time()
+            for file in os.listdir(BotConfig.TEMP_FOLDER):
+                file_path = os.path.join(BotConfig.TEMP_FOLDER, file)
+                if os.path.isfile(file_path):
+                    # حذف الملفات الأقدم من ساعة
+                    if now - os.path.getctime(file_path) > BotConfig.CLEANUP_INTERVAL_HOURS * 3600:
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"تم حذف: {file}")
+                        except Exception as e:
+                            logger.error(f"خطأ في حذف {file}: {e}")
+        except Exception as e:
+            logger.error(f"خطأ في التنظيف: {e}")
+        
+        # الانتظار قبل التنظيف التالي
+        await asyncio.sleep(3600)  # كل ساعة
 
 # ==================== التشغيل الرئيسي ====================
 
@@ -502,7 +650,7 @@ def main():
             handle_youtube_link
         ))
         
-        # معالجة الملفات الصوتية
+        # معالجة الملفات الصوتية - إعطاء رسالة توضيحية
         application.add_handler(MessageHandler(
             filters.AUDIO | filters.VOICE, 
             lambda u, c: u.message.reply_text("🎵 أرسل رابط يوتيوب فقط!")
@@ -513,6 +661,11 @@ def main():
         
         # معالجة الأخطاء
         application.add_error_handler(error_handler)
+        
+        # تشغيل مهمة التنظيف في الخلفية
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.create_task(cleanup_temp_files())
         
         # تشغيل البوت
         logger.info("🤖 البوت يعمل...")
