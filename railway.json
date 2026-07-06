@@ -1,4 +1,3 @@
-# ==================== ملف railway.json ====================
 {
   "build": {
     "builder": "NIXPACKS"
