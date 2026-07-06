@@ -69,41 +69,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = str(update.message.from_user.id)
         
-        # التحقق من وجود صورة
         if not update.message.photo:
             await update.message.reply_text("❌ لم أجد صورة! أرسل صورة من فضلك.")
             return
         
-        # تحميل الصورة
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
-        # تحويل الصورة
         image_data = await file.download_as_bytearray()
         img = Image.open(BytesIO(image_data))
-        
-        # تغيير الحجم
         img = img.resize((512, 512))
         
-        # حفظ الملف
         filename = f"sticker_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         path = os.path.join("stickers", filename)
         img.save(path, "PNG")
         
-        # إرسال الملصق
         with open(path, 'rb') as f:
             await update.message.reply_sticker(f)
         
-        # حذف الملف المؤقت
         try:
             os.remove(path)
         except:
             pass
         
-        # أزرار
         keyboard = [
             [InlineKeyboardButton("🔄 ملصق جديد", callback_data='photo')],
-            [InlineKeyboardButton("📦 إنشاء حزمة", callback_data='create_pack')]
+            [InlineKeyboardButton("📦 إضافة للحزمة", callback_data='create_pack')]
         ]
         await update.message.reply_text(
             "✅ تم صنع الملصق بنجاح!",
@@ -118,47 +109,41 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = str(update.message.from_user.id)
         
-        # التحقق من وجود فيديو
         if not update.message.video:
             await update.message.reply_text("❌ لم أجد فيديو! أرسل فيديو من فضلك.")
             return
         
         video = update.message.video
         
-        # التحقق من الحجم
         if video.file_size > 20 * 1024 * 1024:
             await update.message.reply_text("❌ الفيديو كبير جداً! الحد الأقصى 20 ميجابايت.")
             return
         
-        # تحميل الفيديو
         file = await context.bot.get_file(video.file_id)
         video_data = await file.download_as_bytearray()
         
-        # حفظ الفيديو المؤقت
         temp_filename = f"temp_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
         temp_path = os.path.join("videos", temp_filename)
         
         with open(temp_path, "wb") as f:
             f.write(video_data)
         
-        # تحويل إلى WebP
         webp_filename = f"sticker_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.webp"
         webp_path = os.path.join("stickers", webp_filename)
         
-        # التحقق من وجود ffmpeg
         if not shutil.which('ffmpeg'):
             await update.message.reply_text("❌ البوت يحتاج إلى FFmpeg للتشغيل!")
             return
         
-        # أمر تحويل الفيديو
+        # ✅ الأمر الصحيح لتحويل فيديو إلى ملصق متحرك (WebP)
         cmd = [
             "ffmpeg", "-i", temp_path,
-            "-vf", "fps=10,scale=512:512:flags=lanczos",
-            "-t", "3",
-            "-loop", "0",
-            "-c:v", "libwebp",
-            "-lossless", "0",
-            "-q:v", "70",
+            "-vf", "fps=15,scale=512:512:flags=lanczos",  # زيادة FPS للحركة
+            "-loop", "0",  # تكرار غير محدود
+            "-c:v", "libwebp",  # ترميز WebP
+            "-lossless", "0",  # ضغط مع فقدان
+            "-q:v", "80",  # جودة عالية
+            "-preset", "default",
             "-y",
             webp_path
         ]
@@ -168,14 +153,21 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
             await update.message.reply_text("❌ فشل تحويل الفيديو. تأكد من صيغة MP4.")
+            try:
+                os.remove(temp_path)
+            except:
+                pass
             return
         
-        # التحقق من وجود الملف
-        if not os.path.exists(webp_path):
+        if not os.path.exists(webp_path) or os.path.getsize(webp_path) == 0:
             await update.message.reply_text("❌ فشل إنشاء الملصق المتحرك.")
+            try:
+                os.remove(temp_path)
+            except:
+                pass
             return
         
-        # إرسال الملصق
+        # إرسال الملصق المتحرك
         with open(webp_path, 'rb') as f:
             await update.message.reply_sticker(f)
         
@@ -186,13 +178,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
         
-        # أزرار
         keyboard = [
             [InlineKeyboardButton("🔄 ملصق جديد", callback_data='video')],
-            [InlineKeyboardButton("📦 إنشاء حزمة", callback_data='create_pack')]
+            [InlineKeyboardButton("📦 إضافة للحزمة", callback_data='create_pack')]
         ]
         await update.message.reply_text(
-            "✅ تم صنع الملصق المتحرك بنجاح!",
+            "✅ تم صنع الملصق المتحرك بنجاح! 🎬",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
@@ -201,28 +192,35 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ حدث خطأ: {str(e)[:50]}")
 
 async def create_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 إدخال اسم الحزمة", callback_data='name_pack')],
-        [InlineKeyboardButton("❌ إلغاء", callback_data='cancel_pack')]
-    ]
-    await update.message.reply_text(
-        "📦 **إنشاء حزمة ملصقات جديدة**\n\n"
-        "اضغط على الزر أدناه لإدخال اسم الحزمة:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def name_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = str(query.from_user.id)
-    user_pack_queue[user_id] = {"step": "name", "stickers": []}
-    
-    await query.message.reply_text(
-        "📝 أرسل لي اسم الحزمة (باللغة العربية أو الإنجليزية):"
-    )
+    try:
+        # التعامل مع callback أو message
+        if hasattr(update, 'callback_query') and update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            user_id = str(query.from_user.id)
+            message = query.message
+        else:
+            user_id = str(update.effective_user.id)
+            message = update.message
+        
+        user_pack_queue[user_id] = {"step": "name", "stickers": []}
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ إلغاء", callback_data='cancel_pack')]
+        ]
+        
+        await message.reply_text(
+            "📝 **أدخل اسم الحزمة**\n\n"
+            "أرسل لي اسم الحزمة (مثال: 'حزمة مضحكة' أو 'Fun Pack'):",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"خطأ في إنشاء الحزمة: {e}")
+        if hasattr(update, 'callback_query'):
+            await update.callback_query.message.reply_text("❌ حدث خطأ! حاول مرة أخرى.")
+        else:
+            await update.message.reply_text("❌ حدث خطأ! حاول مرة أخرى.")
 
 async def handle_pack_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -238,12 +236,55 @@ async def handle_pack_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ اسم الحزمة: **{pack_name}**\n\n"
-            "📤 الآن أرسل لي الصور أو الفيديوهات لإضافتها للحزمة.\n"
+            "📤 الآن أرسل لي **الصور** أو **الفيديوهات** لإضافتها للحزمة.\n"
+            "يمكنك إرسال عدة ملفات.\n\n"
             "عند الانتهاء، أرسل كلمة **/done**"
         )
     except Exception as e:
         logger.error(f"خطأ في اسم الحزمة: {e}")
         await update.message.reply_text("❌ حدث خطأ! حاول مرة أخرى.")
+
+async def add_sticker_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = str(update.message.from_user.id)
+        
+        if user_id not in user_pack_queue or user_pack_queue[user_id].get("step") != "stickers":
+            await update.message.reply_text("❌ ليس في وضع إضافة ملصقات. استخدم /start")
+            return
+        
+        # معالجة الصورة
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            
+            # حفظ معرف الملف
+            sticker_file_id = file.file_id
+            user_pack_queue[user_id]["stickers"].append(sticker_file_id)
+            
+            await update.message.reply_text(
+                f"✅ تم إضافة الملصق!\n"
+                f"📊 العدد الحالي: {len(user_pack_queue[user_id]['stickers'])}"
+            )
+        
+        # معالجة الفيديو
+        elif update.message.video:
+            video = update.message.video
+            file = await context.bot.get_file(video.file_id)
+            
+            sticker_file_id = file.file_id
+            user_pack_queue[user_id]["stickers"].append(sticker_file_id)
+            
+            await update.message.reply_text(
+                f"✅ تم إضافة الملصق المتحرك!\n"
+                f"📊 العدد الحالي: {len(user_pack_queue[user_id]['stickers'])}"
+            )
+        
+        else:
+            await update.message.reply_text("❌ أرسل صورة أو فيديو فقط!")
+            
+    except Exception as e:
+        logger.error(f"خطأ في إضافة الملصق: {e}")
+        await update.message.reply_text("❌ حدث خطأ!")
 
 async def finish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -258,7 +299,7 @@ async def finish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stickers = pack_data.get("stickers", [])
         
         if not stickers:
-            await update.message.reply_text("❌ لا توجد ملصقات في الحزمة!")
+            await update.message.reply_text("❌ لا توجد ملصقات في الحزمة! أرسل بعض الملصقات أولاً.")
             return
         
         # إنشاء معرف الحزمة
@@ -287,8 +328,8 @@ async def finish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ **تم إنشاء الحزمة بنجاح!**\n\n"
             f"📦 الاسم: {pack_name}\n"
             f"📊 عدد الملصقات: {len(stickers)}\n"
-            f"🔗 الرابط: {pack_link}\n\n"
-            f"شارك الرابط مع أصدقائك!",
+            f"🔗 الرابط:\n{pack_link}\n\n"
+            f"شارك الرابط مع أصدقائك! 🎉",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
@@ -308,7 +349,7 @@ async def my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user_packs:
             await update.message.reply_text(
                 "📭 ليس لديك أي حزم ملصقات حتى الآن.\n"
-                "استخدم /start لإنشاء حزمة جديدة."
+                "استخدم /start ثم اضغط 'إنشاء حزمة ملصقات'"
             )
             return
         
@@ -326,7 +367,7 @@ async def my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             "📚 **حزم الملصقات الخاصة بك:**\n\n"
-            "اضغط على أي حزمة لعرضها:",
+            "اضغط على أي حزمة لفتحها:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
@@ -345,6 +386,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("🎬 أرسل الفيديو الآن (MP4):")
         
         elif query.data == 'create_pack':
+            # استدعاء دالة إنشاء الحزمة مع تمرير callback
             await create_pack(update, context)
         
         elif query.data == 'my_packs':
@@ -359,7 +401,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📦 **حزم الملصقات:**\n"
                 "1. اضغط 'إنشاء حزمة'\n"
                 "2. أدخل اسم الحزمة\n"
-                "3. أرسل الملصقات (صور/فيديوهات)\n"
+                "3. أرسل الصور أو الفيديوهات\n"
                 "4. اضغط /done للانتهاء\n\n"
                 "📚 **عرض حزمي:**\n"
                 "يعرض جميع الحزم التي أنشأتها"
@@ -373,9 +415,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id in user_pack_queue:
                 del user_pack_queue[user_id]
             await query.message.reply_text("❌ تم إلغاء إنشاء الحزمة.")
-        
-        elif query.data == 'name_pack':
-            await name_pack(update, context)
             
     except Exception as e:
         logger.error(f"خطأ في معالج الأزرار: {e}")
@@ -412,8 +451,8 @@ def main():
     # إضافة المعالجات
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("done", finish_pack))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.PHOTO, add_sticker_to_pack))
+    app.add_handler(MessageHandler(filters.VIDEO, add_sticker_to_pack))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
