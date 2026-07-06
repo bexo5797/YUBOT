@@ -1,7 +1,7 @@
 # run.py
 """
-Main entry point for the Telegram Sticker Bot.
-Run with: python run.py
+نقطة التشغيل الرئيسية لبوت الملصقات
+للتشغيل: python run.py
 """
 import uvicorn
 from bot.main import app
