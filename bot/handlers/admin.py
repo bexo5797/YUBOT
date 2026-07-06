@@ -176,4 +176,4 @@ admin_handler = CommandHandler('admin', admin_command)
 admin_stats_handler = CommandHandler('admin_stats', admin_stats_command)
 admin_users_handler = CommandHandler('admin_users', admin_users_command)
 admin_broadcast_handler = CommandHandler('admin_broadcast', admin_broadcast_command)
-admin_packs_handler = Command
+admin_packs_handler = CommandHandler('admin_packs', admin_packs_command)
