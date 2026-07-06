@@ -4,8 +4,8 @@
 للتشغيل: python run.py
 """
 import uvicorn
-from bot.main import app
-from bot.config import settings
+from main import app
+from config import settings
 
 if __name__ == "__main__":
     uvicorn.run(
