@@ -63,19 +63,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(sticker_path, 'rb') as f:
             await update.message.reply_sticker(f)
         
-        # رابط واتساب (تشفير الصورة)
-        with open(sticker_path, "rb") as f:
-            img_data = base64.b64encode(f.read()).decode()
-        
-        # رابط واتساب المباشر
-        whatsapp_link = f"https://api.whatsapp.com/send?text=🎨 ملصق جديد من بوت الملصقات!"
-        
-        # رابط تحميل مؤقت (بديل)
-        # يمكنك رفع الملف على خدمة تخزين مؤقت مثل: telegra.ph
+        # رابط واتساب
+        whatsapp_link = "https://api.whatsapp.com/send?text=🎨 ملصق جديد من بوت الملصقات!"
         
         keyboard = [
             [InlineKeyboardButton("📱 مشاركة عبر واتساب", url=whatsapp_link)],
-            [InlineKeyboardButton("📥 تحميل الملصق", callback_data=f'download_{user.id}')],
             [InlineKeyboardButton("🔄 ملصق جديد", callback_data='new_sticker')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -92,7 +84,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     video = update.message.video
     
-    # التحقق من حجم الفيديو (حد أقصى 20 ميجابايت)
+    # التحقق من حجم الفيديو
     if video.file_size > 20 * 1024 * 1024:
         await update.message.reply_text("❌ الفيديو كبير جداً! الحد الأقصى 20 ميجابايت.")
         return
@@ -115,7 +107,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ البوت غير مهيأ بشكل صحيح. يرجى التواصل مع المطور.")
             return
         
-        # استخدام ffmpeg لتحويل الفيديو إلى WebP متحرك
+        # استخدام ffmpeg
         cmd = [
             "ffmpeg", "-i", temp_video,
             "-vf", "fps=10,scale=512:512:flags=lanczos",
@@ -123,15 +115,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "-c:v", "libwebp",
             "-lossless", "0",
             "-q:v", "70",
-            "-t", "3",  # أول 3 ثواني فقط
-            "-y",  # الكتابة فوق الملف
+            "-t", "3",
+            "-y",
             sticker_path
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
-            await update.message.reply_text("❌ حدث خطأ في تحويل الفيديو. تأكد من صيغة الفيديو.")
+            await update.message.reply_text("❌ حدث خطأ في تحويل الفيديو.")
             return
         
         # إرسال الملصق المتحرك
@@ -150,7 +142,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"خطأ في معالجة الفيديو: {e}")
-        await update.message.reply_text("❌ حدث خطأ أثناء معالجة الفيديو. حاول مرة أخرى.")
+        await update.message.reply_text("❌ حدث خطأ أثناء معالجة الفيديو.")
     
     finally:
         # تنظيف الملفات المؤقتة
@@ -200,10 +192,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎬 من فيديو", callback_data='video_sticker')]
             ])
         )
-    
-    elif query.data.startswith('download_'):
-        user_id = query.data.split('_')[1]
-        await query.message.reply_text("🔗 رابط التحميل غير متاح حالياً. سيتم إضافته قريباً!")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"خطأ: {context.error}")
@@ -221,17 +209,9 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
     
-    # تشغيل البوت
-    port = int(os.environ.get('PORT', 8443))
-    logger.info(f"🤖 البوت يعمل على المنفذ {port}...")
-    
-    # استخدام webhook بدلاً من polling لـ Railway
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-        webhook_url=f"https://{os.environ.get('RAILWAY_STATIC_URL', 'localhost')}/{TOKEN}"
-    )
+    # تشغيل البوت باستخدام polling (أسهل وأكثر استقراراً)
+    logger.info("🤖 بدء تشغيل البوت باستخدام Polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
